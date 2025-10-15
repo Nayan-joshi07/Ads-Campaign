@@ -1,0 +1,14 @@
+# Core FastAPI dependencies
+fastapi==0.115.8
+uvicorn==0.34.0
+pydantic==2.10.6
+
+# Testing dependencies
+pytest==8.4.1
+httpx==0.28.1
+
+# Optional: Development dependencies
+# pytest-asyncio  # For async test support
+# pytest-cov     # For test coverage reports
+# black          # Code formatting
+# flake8         # Code linting

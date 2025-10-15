@@ -1,8 +1,9 @@
 from typing import List, Optional
-from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from app.services.health_services import health_monitor
-from app.models.models import Campaign, CampaignStatus, CampaignWithKPIs, Channel, DailyStat, EventIngest, HealthResponse
+from app.models.models import Campaign, CampaignStatus, CampaignWithKPIs, Channel, DailyStat, EventIngest, HealthResponse, IntentQueryRequest
 from app.services.kpi_calculator import KPICalculator
+from app.services.intent_parser import IntentParser
 
 router = APIRouter()
 
@@ -83,8 +84,8 @@ async def get_campaigns(
 
         if filtered_stats:
             kpis = KPICalculator.calculate_kpis(filtered_stats)
-            campaign_dict = campaign.dict()
-            campaign_dict['stats'] = [s.dict() for s in filtered_stats]
+            campaign_dict = campaign.model_dump()
+            campaign_dict['stats'] = [s.model_dump() for s in filtered_stats]
             campaign_dict['kpis'] = kpis
             result_campaigns.append(campaign_dict)
     # Pagination
@@ -115,7 +116,7 @@ async def get_campaign_by_id(campaign_id: str):
     # Calculate KPIs
     kpis = KPICalculator.calculate_kpis(campaign.stats)
 
-    campaign_dict = campaign.dict()
+    campaign_dict = campaign.model_dump()
     campaign_dict['kpis'] = kpis
 
     return campaign_dict
@@ -229,6 +230,119 @@ async def ingest_event(event: EventIngest):
         "message": "Event ingested successfully",
         "campaign_id": event.campaign_id,
         "date": event.date
+    }
+
+
+@router.post("/intent/query", response_model=dict)
+async def query_campaigns_by_intent(request: IntentQueryRequest):
+    """
+    Query campaigns using natural language prompts.
+    
+    Converts simple text prompts into filtered/sorted results without external AI.
+    
+    Examples:
+    - "show top campaigns by ctr" → sort by CTR desc, limit 5
+    - "list paused campaigns" → filter status=paused
+    - "best performing campaign" → max conversions, limit 1
+    - "last 30 days" / "this week" / "yesterday" → apply date ranges
+    
+    Returns the same payload shape as GET /campaigns or 400 with helpful hints.
+    """
+    # Handle empty or whitespace-only prompts
+    if not request.prompt or not request.prompt.strip():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Prompt cannot be empty",
+                "hints": IntentParser().get_hints(),
+                "confidence": 0.0
+            }
+        )
+    
+    parser = IntentParser()
+    intent = parser.parse(request.prompt)
+    
+    # If confidence is too low, return helpful hints
+    if intent.confidence < 0.3:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Could not understand the prompt clearly",
+                "hints": parser.get_hints(),
+                "confidence": intent.confidence
+            }
+        )
+    
+    # Apply filters similar to get_campaigns but based on parsed intent
+    filtered_campaigns = campaigns_db
+    
+    # Apply status filter
+    if 'status' in intent.filters:
+        status_value = CampaignStatus(intent.filters['status'])
+        filtered_campaigns = [c for c in filtered_campaigns if c.status == status_value]
+    
+    # Apply channel filter  
+    if 'channel' in intent.filters:
+        channel_value = Channel(intent.filters['channel'])
+        filtered_campaigns = [c for c in filtered_campaigns if c.channel == channel_value]
+    
+    # Filter stats by date range
+    result_campaigns = []
+    for campaign in filtered_campaigns:
+        filtered_stats = campaign.stats
+        
+        if intent.date_from:
+            filtered_stats = [s for s in filtered_stats if s.date >= intent.date_from]
+        if intent.date_to:
+            filtered_stats = [s for s in filtered_stats if s.date <= intent.date_to]
+        
+        if filtered_stats:
+            kpis = KPICalculator.calculate_kpis(filtered_stats)
+            campaign_dict = campaign.model_dump()
+            campaign_dict['stats'] = [s.model_dump() for s in filtered_stats]
+            campaign_dict['kpis'] = kpis
+            result_campaigns.append(campaign_dict)
+    
+    # Apply sorting if specified
+    if intent.sort_by and result_campaigns:
+        # Map sort_by to the correct KPI field
+        sort_key_mapping = {
+            'ctr': 'ctr',
+            'cvr': 'cvr', 
+            'cpc': 'cpc',
+            'cpa': 'cpa',
+            'conversions': 'total_conversions',
+            'clicks': 'total_clicks',
+            'impressions': 'total_impressions',
+            'spend': 'total_spend',
+            'revenue': 'total_conversions',  # fallback
+            'roas': 'cvr'  # fallback
+        }
+        
+        sort_key = sort_key_mapping.get(intent.sort_by, 'ctr')
+        reverse = intent.sort_order == 'desc'
+        
+        try:
+            result_campaigns.sort(key=lambda x: x['kpis'][sort_key], reverse=reverse)
+        except KeyError:
+            # If sort key doesn't exist, fall back to CTR
+            result_campaigns.sort(key=lambda x: x['kpis']['ctr'], reverse=reverse)
+    
+    # Apply limit
+    if intent.limit:
+        result_campaigns = result_campaigns[:intent.limit]
+    
+    total = len(result_campaigns)
+    
+    return {
+        "data": result_campaigns,
+        "intent": intent.model_dump(),
+        "pagination": {
+            "total": total,
+            "limit": intent.limit or total,
+            "offset": 0,
+            "has_more": False
+        }
     }
 
 
