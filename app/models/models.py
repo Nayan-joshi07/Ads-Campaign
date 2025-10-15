@@ -84,3 +84,9 @@ class ParsedIntent(BaseModel):
 class IntentQueryRequest(BaseModel):
     """Request model for intent-based query endpoint."""
     prompt: str = Field(description="Natural language query prompt")
+
+
+class WebhookConfig(BaseModel):
+    """Request model for webhook configuration."""
+    url: str = Field(description="Webhook URL to post incidents to")
+    threshold: float = Field(default=10.0, ge=0, le=100, description="Error rate threshold percentage")

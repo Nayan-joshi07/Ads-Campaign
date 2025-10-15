@@ -1,7 +1,11 @@
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
+import asyncio
+import json
+import time
 from app.services.health_services import health_monitor
-from app.models.models import Campaign, CampaignStatus, CampaignWithKPIs, Channel, DailyStat, EventIngest, HealthResponse, IntentQueryRequest
+from app.models.models import Campaign, CampaignStatus, CampaignWithKPIs, Channel, DailyStat, EventIngest, HealthResponse, IntentQueryRequest, WebhookConfig
 from app.services.kpi_calculator import KPICalculator
 from app.services.intent_parser import IntentParser
 
@@ -358,3 +362,60 @@ async def health_check():
         error_rate=round(health_monitor.get_error_rate(), 2),
         total_requests=health_monitor.total_requests
     )
+
+
+@router.get("/stream/health")
+async def health_stream():
+    """
+    Server-Sent Events (SSE) that emits health snapshots every 10 seconds.
+    """
+    async def generate_health_events():
+        while True:
+            health_data = {
+                "status": "healthy",
+                "uptime_seconds": round(health_monitor.get_uptime(), 2),
+                "p95_latency_ms": round(health_monitor.get_p95_latency(), 2),
+                "error_rate": round(health_monitor.get_error_rate(), 2),
+                "total_requests": health_monitor.total_requests,
+                "timestamp": time.time()
+            }
+            
+            yield f"data: {json.dumps(health_data)}\n\n"
+            await asyncio.sleep(10)
+    
+    return StreamingResponse(
+        generate_health_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
+
+
+@router.post("/webhooks/configure")
+async def configure_webhook(config: WebhookConfig):
+    """
+    Configure webhook URL and error rate threshold for incident notifications.
+    """
+    health_monitor.configure_webhook(config.url, config.threshold)
+    return {
+        "message": "Webhook configured successfully",
+        "url": config.url,
+        "threshold": config.threshold
+    }
+
+
+@router.get("/webhooks/status")
+async def webhook_status():
+    """
+    Get current webhook configuration status.
+    """
+    return {
+        "configured": health_monitor.webhook_url is not None,
+        "url": health_monitor.webhook_url,
+        "threshold": health_monitor.error_rate_threshold,
+        "last_incident": health_monitor.last_incident_time,
+        "cooldown_seconds": health_monitor.incident_cooldown
+    }
